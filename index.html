@@ -11441,6 +11441,13 @@
                     let searchQuery = '';
                     let zoomPhone = '';
 
+                    // Optimization States
+                    let filteredContacts = [];
+                    let visibleCount = 0;
+                    const BATCH_SIZE = 30; // Load 30 contacts at a time to reduce initial DOM load
+                    let imageObserver = null;
+                    let scrollObserver = null;
+
                     // ────────────── DOM REFS ──────────────
                     const contactListEl = document.getElementById('contactList');
                     const emptyMsgEl = document.getElementById('emptyMessage');
@@ -11492,7 +11499,7 @@
                         if (!opt) return;
                         currentSort = opt.dataset.sort;
                         sortMenu.classList.add('hidden');
-                        render();
+                        applyFilters();
                     });
 
                     // ────────────── TAB SWITCHING ──────────────
@@ -11502,7 +11509,7 @@
                         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('tab-active'));
                         btn.classList.add('tab-active');
                         currentTab = btn.dataset.tab;
-                        render();
+                        applyFilters();
                     });
                     // Stats cards also switch tabs
                     document.querySelectorAll('[data-tab]').forEach(card => {
@@ -11513,22 +11520,33 @@
                                 const targetTabBtn = document.querySelector(`.tab-btn[data-tab="${tab}"]`);
                                 if (targetTabBtn) targetTabBtn.classList.add('tab-active');
                                 currentTab = tab;
-                                render();
+                                applyFilters();
                             }
                         });
                     });
 
-                    // ────────────── SEARCH ──────────────
-                    searchInput.addEventListener('input', (e) => {
+                    // ────────────── SEARCH (Optimized) ──────────────
+                    // Optimization: Debounce search input to prevent re-rendering the full list on every keystroke
+                    function debounce(func, wait) {
+                        let timeout;
+                        return function(...args) {
+                            clearTimeout(timeout);
+                            timeout = setTimeout(() => func.apply(this, args), wait);
+                        };
+                    }
+                    
+                    const handleSearch = debounce((e) => {
                         searchQuery = e.target.value.trim().toLowerCase();
                         clearSearchBtn.classList.toggle('hidden', searchQuery === '');
-                        render();
-                    });
+                        applyFilters();
+                    }, 300); // 300ms delay
+
+                    searchInput.addEventListener('input', handleSearch);
                     clearSearchBtn.addEventListener('click', () => {
                         searchInput.value = '';
                         searchQuery = '';
                         clearSearchBtn.classList.add('hidden');
-                        render();
+                        applyFilters();
                     });
 
                     // ────────────── HELPERS ──────────────
@@ -11542,16 +11560,27 @@
                             }).filter(Boolean);
                         }
                         if (typeof raw === 'string') {
-                            // Split by comma or space to handle both "Rohtak, School" and "Rohtak School"
                             return raw.split(/[,\s]+/).map(t => t.trim().toLowerCase()).filter(Boolean);
                         }
                         return [];
                     }
 
-                    // ────────────── RENDER ──────────────
-                    function render() {
+                    // Throttle for fallback scroll event
+                    function throttle(func, limit) {
+                        let inThrottle;
+                        return function(...args) {
+                            if (!inThrottle) {
+                                func.apply(this, args);
+                                inThrottle = true;
+                                setTimeout(() => inThrottle = false, limit);
+                            }
+                        }
+                    }
+
+                    // ────────────── RENDER LOGIC (Optimized) ──────────────
+                    function applyFilters() {
                         // Filter by tab
-                        let filtered = contacts.filter(c => {
+                        filteredContacts = contacts.filter(c => {
                             if (currentTab === 'personal') return c.type === 'personal';
                             if (currentTab === 'service') return c.type === 'service';
                             if (currentTab === 'starred') return c.star >= 4;
@@ -11559,21 +11588,17 @@
                             return true;
                         });
 
-                        // Search logic – completely rewritten
+                        // Search logic
                         if (searchQuery) {
-                            const queryLower = searchQuery; // already trimmed & lowercased
+                            const queryLower = searchQuery;
                             const terms = queryLower.split(/\s+/).filter(Boolean);
                             const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-                            // 1. If searching by Name or Phone, gather their tags to expand the search
-                            // E.g., Search "Kabir" -> gets Kabir's tags ["rohtak", "school"]
                             const expandedTags = new Set();
                             contacts.forEach(c => {
                                 const cName = c.name ? String(c.name).toLowerCase() : "";
                                 const cPhone = c.phone ? String(c.phone).toLowerCase() : "";
 
-                                // We check if the ENTIRE search query matches any part of name or phone
-                                // Or if any individual term matches name or phone
                                 const matchesFull = cName.includes(queryLower) || cPhone.includes(queryLower);
                                 const matchesTerm = terms.some(term => cName.includes(term) || cPhone.includes(term));
 
@@ -11582,34 +11607,24 @@
                                 }
                             });
 
-                            // 2. Filter the list
-                            filtered = filtered.filter(c => {
+                            filteredContacts = filteredContacts.filter(c => {
                                 const cName = c.name ? String(c.name).toLowerCase() : "";
                                 const cPhone = c.phone ? String(c.phone).toLowerCase() : "";
                                 const cRemark = c.remark ? String(c.remark).toLowerCase() : "";
-                                const cOwner = c.owner ? String(c.owner).toLowerCase() : "";
                                 const cTags = getTags(c);
 
-                                // a) Direct match: full query or terms found in Name, Phone, Remark, Tags
                                 const textToSearch = `${cName} ${cPhone} ${cRemark} ${cTags.join(' ')}`;
 
-                                // Does the ENTIRE search query appear anywhere?
                                 if (textToSearch.includes(queryLower)) return true;
 
-                                // Do ALL the search terms appear individually? (e.g. "Rohtak gym" matches contact with "Rohtak" and "gym")
                                 const matchesAllTerms = terms.every(term => textToSearch.includes(term));
                                 if (matchesAllTerms) return true;
 
-                                // Do ANY of the search terms match any tag exactly or by boundary?
-                                // (Handles searching "gym" matching tag "gym")
                                 const matchesAnyTag = terms.some(term =>
                                     cTags.some(tag => new RegExp('\\b' + escapeRegExp(term) + '\\b').test(tag) || tag.includes(term))
                                 );
                                 if (matchesAnyTag) return true;
 
-                                // b) Contact shares at least one tag from the expanded matching set
-                                // Example: Kabir matched by name. Kabir's tags are in `expandedTags`.
-                                // If this contact shares ANY of those tags, show them!
                                 if (cTags.some(tag => expandedTags.has(tag))) return true;
 
                                 return false;
@@ -11617,35 +11632,12 @@
                         }
 
                         // Sort
-                        if (currentSort === 'name-asc') filtered.sort((a, b) => a.name.localeCompare(b.name));
-                        else if (currentSort === 'name-desc') filtered.sort((a, b) => b.name.localeCompare(a.name));
-                        else if (currentSort === 'star-desc') filtered.sort((a, b) => b.star - a.star);
-                        else if (currentSort === 'star-asc') filtered.sort((a, b) => a.star - b.star);
+                        if (currentSort === 'name-asc') filteredContacts.sort((a, b) => a.name.localeCompare(b.name));
+                        else if (currentSort === 'name-desc') filteredContacts.sort((a, b) => b.name.localeCompare(a.name));
+                        else if (currentSort === 'star-desc') filteredContacts.sort((a, b) => b.star - a.star);
+                        else if (currentSort === 'star-asc') filteredContacts.sort((a, b) => a.star - b.star);
                         else {
-                            filtered.sort((a, b) => a.name.localeCompare(b.name));
-                        }
-
-                        // Render cards
-                        if (filtered.length === 0) {
-                            contactListEl.innerHTML = '';
-                            emptyMsgEl.classList.remove('hidden');
-                        } else {
-                            emptyMsgEl.classList.add('hidden');
-                            contactListEl.innerHTML = filtered.map((c, idx) => `
-          <div class="contact-card flex items-center gap-3" style="animation-delay: ${idx * 0.02}s;" onclick="window.location.href='tel:${c.phone}'" data-phone="${c.phone}" data-img="photo/${c.phone}.jpg" data-name="${c.name}">
-            <img src="photo/${c.phone}.jpg" onerror="this.onerror=null; this.src='photo/default.png';" loading="lazy" onclick="event.stopPropagation(); openZoom(this.src,'${c.phone}','${c.name}')" class="w-12 h-12 rounded-full object-cover border-2 border-white dark:border-slate-600 shadow-sm avatar-ring cursor-pointer" alt="${c.name}" />
-            <div class="flex-1 min-w-0">
-              <p class="font-semibold text-sm truncate">${highlightMatch(c.name)}</p>
-              <p class="text-xs text-gray-500 dark:text-gray-400 truncate">${highlightMatch(c.phone)}</p>
-              <span class="text-xs px-2 py-0.5 rounded-full ${c.type === 'personal' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' : 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'}">${c.type}</span>
-            </div>
-            <div class="text-right flex-shrink-0">
-              <p class="text-xs text-gray-500 dark:text-gray-400">${c.owner}</p>
-              <div><span class="text-yellow-500">${'★'.repeat(c.star)}</span><span class="text-gray-300 dark:text-gray-600">${'★'.repeat(5 - c.star)}</span></div>
-              <p class="text-xs text-gray-400 dark:text-gray-500 truncate max-w-[80px]">${highlightMatch(c.remark)}</p>
-            </div>
-          </div>
-        `).join('');
+                            filteredContacts.sort((a, b) => a.name.localeCompare(b.name));
                         }
 
                         // Update counts
@@ -11655,7 +11647,127 @@
                         serviceCountEl.textContent = contacts.filter(c => c.type === 'service').length;
                         fiveStarCountEl.textContent = contacts.filter(c => c.star === 5).length;
 
+                        // Optimization: Reset DOM and only render the first batch
+                        contactListEl.innerHTML = '';
+                        visibleCount = 0;
+                        renderBatch();
+                    }
+
+                    function renderBatch() {
+                        if (filteredContacts.length === 0 && visibleCount === 0) {
+                            emptyMsgEl.classList.remove('hidden');
+                            return;
+                        }
+                        emptyMsgEl.classList.add('hidden');
+
+                        const nextBatch = filteredContacts.slice(visibleCount, visibleCount + BATCH_SIZE);
+                        if (nextBatch.length === 0) return; // No more to render
+
+                        // Optimization: Lightweight SVG placeholder for images initially
+                        const placeholderSVG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' fill='%23f1f5f9'/%3E%3C/svg%3E";
+                        
+                        // Optimization: Build HTML string efficiently and insert with insertAdjacentHTML to minimize reflows
+                        const htmlString = nextBatch.map((c, idx) => {
+                            const delay = (idx % BATCH_SIZE) * 0.02;
+                            return `
+                                <div class="contact-card flex items-center gap-3" style="animation-delay: ${delay}s;" onclick="window.location.href='tel:${c.phone}'" data-phone="${c.phone}" data-name="${c.name}">
+                                    <img src="${placeholderSVG}" data-src="photo/${c.phone}.jpg" onerror="this.onerror=null; this.src='photo/default.png'; this.classList.remove('lazy-image');" loading="lazy" decoding="async" width="48" height="48" onclick="event.stopPropagation(); openZoom(this.dataset.src || this.src,'${c.phone}','${c.name}')" class="lazy-image w-12 h-12 rounded-full object-cover border-2 border-white dark:border-slate-600 shadow-sm avatar-ring cursor-pointer" alt="${c.name}" />
+                                    <div class="flex-1 min-w-0">
+                                      <p class="font-semibold text-sm truncate">${highlightMatch(c.name)}</p>
+                                      <p class="text-xs text-gray-500 dark:text-gray-400 truncate">${highlightMatch(c.phone)}</p>
+                                      <span class="text-xs px-2 py-0.5 rounded-full ${c.type === 'personal' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' : 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'}">${c.type}</span>
+                                    </div>
+                                    <div class="text-right flex-shrink-0">
+                                      <p class="text-xs text-gray-500 dark:text-gray-400">${c.owner}</p>
+                                      <div><span class="text-yellow-500">${'★'.repeat(c.star)}</span><span class="text-gray-300 dark:text-gray-600">${'★'.repeat(5 - c.star)}</span></div>
+                                      <p class="text-xs text-gray-400 dark:text-gray-500 truncate max-w-[80px]">${highlightMatch(c.remark)}</p>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('');
+
+                        contactListEl.insertAdjacentHTML('beforeend', htmlString);
+                        visibleCount += nextBatch.length;
+
+                        // Observe new images and the new last element for infinite scroll
+                        observeImages();
+                        observeLastElement();
+                        
                         if (window.lucide) lucide.createIcons();
+                    }
+
+                    // ────────────── PERFORMANCE OBSERVERS ──────────────
+                    // Optimization: Image Lazy Loading via IntersectionObserver
+                    function observeImages() {
+                        if (!('IntersectionObserver' in window)) {
+                            // Fallback for older browsers
+                            document.querySelectorAll('.lazy-image').forEach(img => {
+                                if (img.dataset.src) {
+                                    img.src = img.dataset.src;
+                                    img.removeAttribute('data-src');
+                                    img.classList.remove('lazy-image');
+                                }
+                            });
+                            return;
+                        }
+
+                        if (!imageObserver) {
+                            imageObserver = new IntersectionObserver((entries, observer) => {
+                                entries.forEach(entry => {
+                                    if (entry.isIntersecting) {
+                                        const img = entry.target;
+                                        if (img.dataset.src) {
+                                            img.src = img.dataset.src;
+                                            img.removeAttribute('data-src');
+                                            img.classList.remove('lazy-image');
+                                        }
+                                        observer.unobserve(img); // Unobserve after loading
+                                    }
+                                });
+                            }, { rootMargin: '100px' }); // Preload image slightly before it enters viewport
+                        }
+
+                        document.querySelectorAll('.lazy-image').forEach(img => {
+                            if (img.dataset.src) {
+                                imageObserver.observe(img);
+                            }
+                        });
+                    }
+
+                    let fallbackScrollAttached = false;
+
+                    // Optimization: Infinite Scroll / Load more on scroll near bottom
+                    function observeLastElement() {
+                        if (!('IntersectionObserver' in window)) {
+                            if (!fallbackScrollAttached) {
+                                window.addEventListener('scroll', throttle(() => {
+                                    if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
+                                        if (visibleCount < filteredContacts.length) {
+                                            renderBatch();
+                                        }
+                                    }
+                                }, 200));
+                                fallbackScrollAttached = true;
+                            }
+                            return;
+                        }
+
+                        if (scrollObserver) {
+                            scrollObserver.disconnect();
+                        }
+
+                        scrollObserver = new IntersectionObserver((entries) => {
+                            if (entries[0].isIntersecting) {
+                                if (visibleCount < filteredContacts.length) {
+                                    renderBatch();
+                                }
+                            }
+                        }, { rootMargin: '200px' });
+
+                        const lastChild = contactListEl.lastElementChild;
+                        if (lastChild) {
+                            scrollObserver.observe(lastChild);
+                        }
                     }
 
                     // Highlight search match
@@ -11719,7 +11831,7 @@
                     });
 
                     // ────────────── INIT ──────────────
-                    render();
+                    applyFilters();
                     window.openZoom = openZoom;
                     window.closeZoom = closeZoom;
                     window.toggleTheme = toggleTheme;
